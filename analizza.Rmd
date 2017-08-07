@@ -159,8 +159,8 @@ ggplotly(g)
 
 ```
 
-In questo grafico è possibile notare come la densità di apparecchi sia effettivamente proporzionale alla popolazione,
-anche se per alcuni Comuni il numero di apparecchi è superiore a quanto succede in media.
+In questo grafico è possibile notare come la quantità di apparecchi sia effettivamente proporzionale alla popolazione,
+anche se per alcune Province il numero di apparecchi è superiore a quanto succede in media.
 
 ```{r plotprovince_dens,echo=FALSE}
 g=ggplot(densprovdf,aes(x=pop18,y=tot))+geom_point()+
@@ -205,7 +205,7 @@ g=ggplot(denscomdf,aes(x=COMUNE,y=dens,fill=dens))+
 ggplotly(g)
 ```
 
-In questo grafico è possibile notare come la densità di apparecchi sia effettivamente proporzionale alla popolazione,
+In questo grafico è possibile notare come la quantità di apparecchi sia effettivamente proporzionale alla popolazione,
 anche se per alcuni Comuni il numero di apparecchi è superiore a quanto succede in media.
 
 ```{r plotcomuni_dens,echo=FALSE}
