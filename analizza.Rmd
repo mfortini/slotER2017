@@ -1,0 +1,369 @@
+---
+title: "Slot in Emilia-Romagna"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+## Slot in Emilia-Romagna
+
+A seguito della nuova [delibera di Giunta attuativa della Legge Regionale per il contrasto al gioco d'azzardo](http://www.regione.emilia-romagna.it/notizie/2017/giugno/stop-alle-slot-machine-sale-gioco-e-scommesse-vietate-entro-500-metri-da-scuole-e-centri-di-aggregazione-giovanili)
+la Regione ha inviato a tutti i Comuni la lista degli esercenti ed il numero di apparecchi per ciascuno di essi, aggiornata al 14/06/2017.
+
+Ne ho approfittato per aggregare i dati e fare qualche analisi sulla distribuzione e sulla densità di questi "giochi" in ogni Comune e Provincia.
+
+Ho collegato questi dati sia alla popolazione residente dai 18 anni in su, sia alla superficie, utilizzando
+i [dati ISTAT sulla popolazione residente all'1 Gennaio 2017](http://demo.istat.it/pop2017/index3.html) e 
+i [confini ISTAT delle unità amministrative aggiornati al 2016](https://www.istat.it/it/archivio/124086).
+In particolare, ho calcolato la densità di apparecchi totali rispetto alla popolazione maggiorenne e quella di esercizi rispetto alla superficie.
+
+```{r elaborazioni, echo=FALSE, message=FALSE,warning=FALSE}
+suppressPackageStartupMessages({
+require(ggplot2)
+require(dplyr)
+require(fuzzyjoin)
+require(rgdal)
+require(rgeos)
+require(leaflet)
+require(plotly)
+})
+
+# Questo codice era per aggregare i dati forniti dalla Regione
+#
+#data=read.csv('NApparecchi.csv',stringsAsFactors=FALSE)
+#colnames(data)[2]='comune'
+#data=data[!is.na(data$comune),]
+#data=data[data$comune != "NON DEFINITO",]
+#
+#data[data$comune=="MIGLIARINO",]$comune="FISCAGLIA"
+#data[data$comune=="GRANAGLIONE",]$comune="ALTO RENO TERME"
+#data[data$comune=="PORRETTA TERME",]$comune="ALTO RENO TERME"
+#data[data$comune=="ZIBELLO",]$comune="POLESINE ZIBELLO"
+#data[data$comune=="POLESINE PARMENSE",]$comune="POLESINE ZIBELLO"
+#data[data$comune=="MONTESCUDO",]$comune="MONTESCUDO - MONTE COLOMBO"
+#data[data$comune=="MONTESCUDO-MONTE COLOMBO",]$comune="MONTESCUDO - MONTE COLOMBO"
+#
+#data=data[!is.na(data$N),]
+#
+#data=data %>% group_by(Provincia,comune) %>% summarize(tot=sum(N),esercizi=n())
+#
+#write.csv(data,'datislot_2017-06-14.csv')
+ 
+data=read.csv(xzfile('datislot_2017-06-14.csv.xz'))
+
+# Dati ISTAT di popolazione
+comunipop=read.csv(xzfile('comuni_2017-01-01.csv.xz'),stringsAsFactors=FALSE)
+
+# Solo 18+ anni, ma 999 è la riga con i totali, va esclusa altrimenti
+# si sbaglia del doppio
+comunipop=comunipop %>% filter(Eta>=18 & Eta != 999)
+comunipop$Tot=comunipop$Totale.Maschi+comunipop$Totale.Femmine
+
+provincepop=read.csv(xzfile('province_2017-01-01.csv.xz'),stringsAsFactors=FALSE,skip=1)
+provincepop=provincepop %>% filter(Eta>=18)
+provincepop$Tot=provincepop$Totale.Maschi+provincepop$Totale.Femmine
+
+# Limiti cartografici comuni e province
+limiti16=readOGR('Limiti_2016_WGS84_g/Com2016_WGS84_g/Com2016_WGS84_g.shp')
+limiti16pro=readOGR('Limiti_2016_WGS84_g/CMProv2016_WGS84_g/CMprov2016_WGS84_g.shp')
+
+# Filtro solo la Regione Emilia-Romagna (codice ISTAT 8)
+limiti16=limiti16[limiti16$COD_REG==8,]
+limiti16pro=limiti16pro[limiti16pro$COD_REG==8,]
+
+# Data frame per associare ad ogni nome di Comune il codice ISTAT
+limiti_df=data_frame(comune=limiti16$COMUNE, PRO_COM=limiti16$PRO_COM, COD_PRO=limiti16$COD_PRO, COD_REG=limiti16$COD_REG) %>% filter(COD_REG==8)
+limiti_df$comune=toupper(limiti_df$comune)
+
+comunipop$Codice.Provincia=floor(comunipop$Codice.Comune/1000)
+
+# Seleziono solo i Comuni che risiedono nelle Province della Regione Emilia Romagna e aggrego la popolazione
+provincepop = provincepop %>% 
+        group_by(Codice.Provincia) %>% 
+        filter(Codice.Provincia %in% limiti_df$COD_PRO) %>% 
+        summarize(pop18=sum(Tot))
+
+comunipop = comunipop %>% 
+        group_by(Codice.Comune) %>% 
+        filter(Codice.Provincia %in% limiti_df$COD_PRO) %>%
+        summarize(pop18=sum(Tot),nome=first(Nome.Comune))
+
+provincepop$COD_PRO=provincepop$Codice.Provincia
+
+# Fuzzy join dei nomi dei comuni per assegnare codice ISTAT,
+# uso della distanza per compensare piccole differenze di ortografia
+sij = limiti_df %>% stringdist_right_join(data,by='comune',max_dist=1,distance_col='distance')
+
+# Scelta del match più vicino
+data_limiti <- sij %>%
+  group_by(comune.y) %>%
+  top_n(1, desc(distance)) %>%
+  ungroup()
+
+data_limiti$Codice.Comune=as.numeric(as.character(data_limiti$PRO_COM))
+
+# Per verificare se ci siano comuni non assegnati
+# comuni_data=unique(data$comune)
+# comuni_closest=unique(data_limiti$comune.y)
+# setdiff(comuni_data,comuni_closest)
+
+# Join fra comuni e dati, calcolo delle densità
+nslotcomune=right_join(data_limiti,comunipop)
+nslotcomune$PRO_COM=nslotcomune$Codice.Comune
+nslotcomune$COD_PRO=floor(nslotcomune$Codice.Comune/1000)
+nslotcomune$tot[is.na(nslotcomune$tot)]=0
+nslotcomune$esercizi[is.na(nslotcomune$esercizi)]=0
+nslotcomune$dens=nslotcomune$tot/nslotcomune$pop18
+
+# Join fra province e dati, calcolo delle densità
+nslotprovincia=right_join(data_limiti,provincepop)
+nslotprovincia=nslotprovincia %>% group_by(COD_PRO) %>% summarize(tot=sum(tot),esercizi=sum(esercizi),pop18=first(pop18),Provincia=first(Provincia))
+nslotprovincia$dens=nslotprovincia$tot/nslotprovincia$pop18
+
+# Proiezione degli shapefile in WGS84
+limiti16pro <- spTransform(limiti16pro, CRS("+proj=longlat +datum=WGS84 +no_defs"))
+# Join con i dati
+limiti16nslotprovincia=merge(limiti16pro,nslotprovincia,by="COD_PRO")
+limiti16nslotprovincia$densesercizi=(limiti16nslotprovincia$esercizi/limiti16nslotprovincia$SHAPE_Area)*1e6
+
+# Proiezione degli shapefile in WGS84
+limiti16 <- spTransform(limiti16, CRS("+proj=longlat +datum=WGS84 +no_defs"))
+# Join con i dati
+limiti16nslotcomune=merge(limiti16,nslotcomune,by="PRO_COM")
+limiti16nslotcomune$densesercizi=(limiti16nslotcomune$esercizi/limiti16nslotcomune$SHAPE_Area)*1e6
+
+denscomdf=as.data.frame(limiti16nslotcomune)
+densprovdf=as.data.frame(limiti16nslotprovincia)
+
+denscomdf$denspop18=denscomdf$pop18/denscomdf$SHAPE_Area*1e6
+
+
+```
+
+## Densità di apparecchi in funzione della popolazione(18+)
+
+### Densità di apparecchi in funzione della popolazione(18+) per Provincia
+
+```{r graficoprovince_dens, echo=FALSE}
+g=ggplot(densprovdf,aes(x=Provincia,y=dens,fill=dens))+
+        geom_bar(stat="identity")+
+        scale_x_discrete (limits = densprovdf$Provincia[order(densprovdf$dens)])+
+        guides(fill=FALSE)+
+        coord_flip()+
+        theme(text = element_text(size=20))+
+        ylab("Densità (apparecchi/1000ab)")+
+        scale_fill_distiller(palette="BuPu",trans="reverse")
+ggplotly(g)
+
+```
+
+In questo grafico è possibile notare come la densità di apparecchi sia effettivamente proporzionale alla popolazione,
+anche se per alcuni Comuni il numero di apparecchi è superiore a quanto succede in media.
+
+```{r plotprovince_dens,echo=FALSE}
+g=ggplot(densprovdf,aes(x=pop18,y=tot))+geom_point()+
+        geom_smooth(method='glm')+scale_x_log10()+
+        scale_y_log10()+
+        geom_text(aes(label=densprovdf$Provincia))+ 
+        theme(text = element_text(size=20)) + xlab("Popolazione 18+") + ylab("Numero apparecchi")
+ggplotly(g)
+```
+
+In questa mappa invece è possibile vedere la distribuzione della densità di apparecchi per ogni Provincia.
+
+```{r mappaprovince_dens, echo=FALSE}
+popup=sprintf("<h1>Provincia di %s</h1>
+                            <table><tr><td>Numero apparecchi</td><td>%d</td></tr><tr><td>Popolazione(18+)</td><td>%d</td><tr></tr><td>Densità</td><td>%f (/1000 ab)</td></tr></table>",limiti16nslotprovincia$Provincia,limiti16nslotprovincia$tot,limiti16nslotprovincia$pop18,limiti16nslotprovincia$dens*1000)
+pal=colorQuantile("YlOrRd",limiti16nslotprovincia$dens)
+fillColor=pal(limiti16nslotprovincia$dens)
+fillColor[limiti16nslotprovincia$tot==0]="#999999"
+leaflet(gSimplify(limiti16nslotprovincia,tol=0.01,topologyPreserve=TRUE)) %>% addPolygons(fillColor=fillColor,weight = 2,
+  opacity = 1,
+  color = "white",
+  dashArray = "3",
+  fillOpacity = 0.7,
+  popup=popup) %>% addTiles()
+```
+
+### Densità di apparecchi in funzione della popolazione(18+) per Comune
+
+I primi 20 comuni per densità di apparecchi in funzione della popolazione maggiorenne sono visualizzati nel seguente grafico.
+
+```{r graficocomuni_dens, echo=FALSE}
+denscomdf=as.data.frame(limiti16nslotcomune)
+denscomdf=denscomdf[order(denscomdf$dens,decreasing=T),][1:20,]
+g=ggplot(denscomdf,aes(x=COMUNE,y=dens,fill=dens))+
+        geom_bar(stat="identity")+
+        scale_x_discrete (limits = denscomdf$COMUNE[order(denscomdf$dens)])+
+        guides(fill=FALSE)+
+        coord_flip()+
+        theme(text = element_text(size=20))+
+        ylab("Densità (apparecchi/1000ab)")+
+        scale_fill_distiller(palette="BuPu",trans="reverse")
+ggplotly(g)
+```
+
+In questo grafico è possibile notare come la densità di apparecchi sia effettivamente proporzionale alla popolazione,
+anche se per alcuni Comuni il numero di apparecchi è superiore a quanto succede in media.
+
+```{r plotcomuni_dens,echo=FALSE}
+g=ggplot(denscomdf,aes(x=pop18,y=tot))+geom_point()+
+        geom_smooth(method='glm')+scale_x_log10()+
+        scale_y_log10()+
+        geom_text(aes(label=denscomdf$COMUNE))+ 
+        theme(text = element_text(size=20)) + xlab("Popolazione 18+") + ylab("Numero apparecchi")
+ggplotly(g)
+```
+
+In questa mappa invece è possibile vedere la distribuzione della densità di apparecchi per ogni Comune.
+
+```{r mappacomuni_dens, echo=FALSE}
+popup=sprintf("<h1>Comune di %s</h1>
+                            <table><tr><td>Numero apparecchi</td><td>%d</td></tr><tr><td>Popolazione(18+)</td><td>%d</td><tr></tr><td>Densità</td><td>%f (/1000 ab)</td></tr></table>",limiti16nslotcomune$COMUNE,limiti16nslotcomune$tot,limiti16nslotcomune$pop18,limiti16nslotcomune$dens*1000)
+pal=colorQuantile("YlOrRd",limiti16nslotcomune$dens)
+fillColor=pal(limiti16nslotcomune$dens)
+fillColor[limiti16nslotcomune$tot==0]="#999999"
+leaflet(gSimplify(limiti16nslotcomune,tol=0.01,topologyPreserve=TRUE)) %>% addPolygons(fillColor=fillColor,weight = 2,
+  opacity = 1,
+  color = "white",
+  dashArray = "3",
+  fillOpacity = 0.7,
+  popup=popup) %>% addTiles()
+```
+
+## Densità di esercizi in funzione della superficie
+
+### Densità di esercizi in funzione della superficie per Provincia
+
+In questo grafico è possibile notare come la densità di apparecchi sia effettivamente proporzionale alla popolazione,
+anche se per alcuni Comuni il numero di apparecchi è superiore a quanto succede in media.
+
+```{r graficoprovince_densesercizi, echo=FALSE}
+g=ggplot(densprovdf,aes(x=Provincia,y=densesercizi,fill=densesercizi))+
+        geom_bar(stat="identity")+
+        scale_x_discrete (limits = densprovdf$Provincia[order(densprovdf$densesercizi)])+
+        guides(fill=FALSE)+
+        coord_flip()+
+        theme(text = element_text(size=20))+
+        ylab("Densità (esercizi/kmq)")+
+        scale_fill_distiller(palette="BuPu",trans="reverse")
+ggplotly(g)
+```
+
+In questa mappa invece è possibile vedere la distribuzione della densità di esercizi per ogni Provincia.
+
+```{r mappaprovince_densesercizi, echo=FALSE}
+popup=sprintf("<h1>Provincia di %s</h1>
+                            <table><tr><td>Numero esercizi</td><td>%d</td></tr><tr><td>Superficie(kmq)</td><td>%f</td><tr></tr><td>Densità</td><td>%f (/kmq)</td></tr></table>",limiti16nslotprovincia$Provincia,limiti16nslotprovincia$esercizi,limiti16nslotprovincia$SHAPE_Area/1e6,limiti16nslotprovincia$densesercizi)
+pal=colorQuantile("YlGnBu",limiti16nslotprovincia$densesercizi)
+fillColor=pal(limiti16nslotprovincia$densesercizi)
+fillColor[limiti16nslotprovincia$tot==0]="#999999"
+leaflet(gSimplify(limiti16nslotprovincia,tol=0.01,topologyPreserve=TRUE)) %>% addPolygons(fillColor=fillColor,weight = 2,
+  opacity = 1,
+  color = "white",
+  dashArray = "3",
+  fillOpacity = 0.7,
+  popup=popup) %>% addTiles()
+```
+
+### Densità di esercizi in funzione della superficie per Comune
+
+I primi 20 comuni per densità di esercizi in funzione della superficie sono visualizzati nel seguente grafico.
+
+```{r graficocomuni_densesercizi, echo=FALSE}
+denscomdf=as.data.frame(limiti16nslotcomune)
+denscomdf=denscomdf[order(denscomdf$densesercizi,decreasing=T),][1:20,]
+g=ggplot(denscomdf,aes(x=COMUNE,y=densesercizi,fill=densesercizi))+
+        geom_bar(stat="identity")+
+        scale_x_discrete (limits = denscomdf$COMUNE[order(denscomdf$densesercizi)])+
+        guides(fill=FALSE)+
+        coord_flip()+
+        theme(text = element_text(size=20))+
+        ylab("Densità (esercizi/kmq)")+
+        scale_fill_distiller(palette="BuPu",trans="reverse")
+ggplotly(g)
+```
+
+In questa mappa invece è possibile vedere la distribuzione della densità di esercizi per ogni Comune.
+
+```{r mappacomuni_densesercizi, echo=FALSE}
+popup=sprintf("<h1>Comune di %s</h1>
+                            <table><tr><td>Numero esercizi</td><td>%d</td></tr><tr><td>Superficie(kmq)</td><td>%f</td><tr></tr><td>Densità</td><td>%f (/kmq)</td></tr></table>",limiti16nslotcomune$COMUNE,limiti16nslotcomune$tot,limiti16nslotcomune$SHAPE_Area/1e6,limiti16nslotcomune$densesercizi)
+pal=colorQuantile("YlGnBu",limiti16nslotcomune$densesecizi)
+fillColor=pal(limiti16nslotcomune$densesercizi)
+fillColor[limiti16nslotcomune$tot==0]="#999999"
+leaflet(limiti16nslotcomune) %>% addPolygons(fillColor=fillColor,weight = 2,
+  opacity = 1,
+  color = "white",
+  dashArray = "3",
+  fillOpacity = 0.7,
+  popup=popup) %>% addTiles()
+```
+
+## Dettaglio 
+
+### Densità di apparecchi in funzione della popolazione(18+) per Comune
+
+I primi 5 comuni per densità di apparecchi in funzione della popolazione maggiorenne sono visualizzati nei seguenti grafici.
+
+```{r graficocomuni_dett_dens, echo=FALSE}
+denscomdf=as.data.frame(limiti16nslotcomune)
+province=unique(denscomdf$COD_PRO.x)
+plt <- htmltools::tagList()
+  i <- 1
+for (prov in province) {
+denscomdf=as.data.frame(limiti16nslotcomune)
+denscomdf=denscomdf %>% filter(COD_PRO.x==prov)
+denscomdf=denscomdf[order(denscomdf$dens,decreasing=T),][1:5,]
+g=ggplot(denscomdf,aes(x=COMUNE,y=dens,fill=dens))+
+        geom_bar(stat="identity")+
+        scale_x_discrete (limits = denscomdf$COMUNE[order(denscomdf$dens)])+
+        guides(fill=FALSE)+
+        coord_flip()+
+        theme(text = element_text(size=16))+
+        ylab("Densità (apparecchi/1000ab)")+
+        xlab("")+
+        scale_fill_distiller(palette="BuPu",trans="reverse")+ggtitle(sprintf("Primi 5 comuni provincia di %s",denscomdf$Provincia[1]))
+g=g+theme(panel.spacing.x=unit(0.5, "lines"),panel.spacing.y=unit(1, "lines"))
+ plt[[i]] <- as_widget(ggplotly(g))
+      i <- i + 1
+
+}
+
+    plt
+
+```
+
+### Densità di esercizi in funzione della superficie per Comune
+
+I primi 5 comuni per densità di esercizi in funzione della superficie sono visualizzati nei seguenti grafici.
+
+```{r graficocomuni_dett_densesercizi, echo=FALSE}
+plt <- htmltools::tagList()
+  i <- 1
+for (prov in province) {
+denscomdf=as.data.frame(limiti16nslotcomune)
+denscomdf=denscomdf %>% filter(COD_PRO.x==prov)
+denscomdf=denscomdf[order(denscomdf$densesercizi,decreasing=T),][1:5,]
+g=ggplot(denscomdf,aes(x=COMUNE,y=dens,fill=dens))+
+        geom_bar(stat="identity")+
+        scale_x_discrete (limits = denscomdf$COMUNE[order(denscomdf$dens)])+
+        guides(fill=FALSE)+
+        coord_flip()+
+        theme(text = element_text(size=16))+
+        ylab("Densità (esercizi/kmq)")+
+        xlab("")+
+        scale_fill_distiller(palette="BuPu",trans="reverse")+ggtitle(sprintf("Primi 5 comuni provincia di %s",denscomdf$Provincia[1]))
+
+ plt[[i]] <- as_widget(ggplotly(g))
+      i <- i + 1
+
+}
+  plt
+```
+
+<a rel="license" href="http://creativecommons.org/licenses/by/4.0/"><img alt="Licenza Creative Commons" style="border-width:0" src="https://i.creativecommons.org/l/by/4.0/88x31.png" /></a><br />Quest'opera è distribuita con Licenza <a rel="license" href="http://creativecommons.org/licenses/by/4.0/">Creative Commons Attribuzione 4.0 Internazionale</a>.
+
+
